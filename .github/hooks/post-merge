@@ -1,0 +1,4 @@
+#!/bin/sh
+
+# @see https://git-scm.com/docs/githooks#_post_merge
+exec make post-pull

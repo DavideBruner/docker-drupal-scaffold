@@ -1,0 +1,139 @@
+name: CI
+
+on: [push]
+
+env:
+  COMPOSER_MEMORY_LIMIT: -1
+  SIMPLETEST_DB: sqlite://tmp/site.sqlite
+  SIMPLETEST_BASE_URL: "http://127.0.0.1:8080"
+
+jobs:
+  phpcs:
+    runs-on: 'ubuntu-20.04'
+    strategy:
+      matrix:
+        php_version: [ '7.4' ]
+        drupal-release: [ 'stable' ]
+        composer-channel: [ 'stable' ]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up PHP ${{ matrix.php_version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php_version }}
+
+      - name: Install dependencies
+        working-directory: ./drupal
+        run: composer install
+
+      - name: Run phpcs with Drupal coding standards.
+        working-directory: ./drupal
+        run: >
+          ./vendor/bin/phpcs \
+            --standard="Drupal,DrupalPractice" -n \
+            --extensions="php,module,inc,install,test,profile,theme" \
+            web/themes/custom \
+            web/modules/custom
+
+  drupal-check-deprecations:
+    runs-on: 'ubuntu-20.04'
+    strategy:
+      matrix:
+        php_version: [ '7.4' ]
+        drupal-release: [ 'stable' ]
+        composer-channel: [ 'stable' ]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up PHP ${{ matrix.php_version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php_version }}
+
+      - name: Install dependencies
+        working-directory: ./drupal
+        run: composer install
+
+      - name: Run drupal-check for deprecations.
+        working-directory: ./drupal
+        run: ./vendor/bin/drupal-check -d web/modules/custom && ./vendor/bin/drupal-check -d web/themes/custom
+
+  build:
+    runs-on: 'ubuntu-20.04'
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: ['7.4']
+        drupal-release: ['stable']
+        composer-channel: ['stable']
+    steps:
+      - name: Dump matrix context
+        env:
+          MATRIX_CONTEXT: ${{ toJSON(matrix) }}
+        run: echo "$MATRIX_CONTEXT"
+
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup PHP ${{ matrix.php-versions }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-versions }}
+          extensions: gd, pdo_sqlite
+
+      - name: Update composer
+        run: composer --verbose self-update --${{ matrix.composer-channel }}
+
+      - name: Dump composer version
+        run: composer --version
+      
+      - name: Dump composer autoload
+        working-directory: ./drupal
+        run: composer dump-autoload
+
+      - name: Validate composer.json
+        working-directory: ./drupal
+        run: composer --verbose validate
+
+      - name: Install dependencies
+        working-directory: ./drupal
+        run: composer install
+
+      - name: Create .env file
+        run: mv .env.build .env
+
+      - name: Set files directory
+        working-directory: ./drupal/web/sites/default
+        run: mkdir files && chmod 777 files/
+
+      - name: Create private directory
+        working-directory: ./drupal
+        run: mkdir private && chmod 777 private
+
+      - name: Create content_synchronizer directory
+        working-directory: ./drupal/private
+        run: mkdir content_synchronizer && chmod 777 content_synchronizer
+
+      - name: Start Docker environment
+        run: |
+          docker-compose -f docker-compose.build.yml up -d
+
+      - name: Wait for MariaDB service to start
+        run: |
+          while ! docker-compose exec -T mariadb mysql --user=drupal --password=drupal -e "SELECT 1" >/dev/null 2>&1; do
+              sleep 1
+          done
+
+      # Note: -T option required to avoid creating pseudo-TTY.
+      - name: Install Drupal site
+        run: >-
+          docker-compose exec -T -u wodby php sh -c 'drush site:install -y'
+        env:
+          COMPOSE_INTERACTIVE_NO_CLI: '1'
+
+      - name: Test loading the home page.
+        run: >
+          curl -s http://localhost:8080 | grep "Welcome"
